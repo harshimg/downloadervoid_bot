@@ -96,8 +96,15 @@ class Downloader:
 
         formats = info.get("formats") or []
         options = self._build_format_options(formats)
+        if not options and self._is_youtube_info(url, info):
+            options = self._fallback_youtube_options()
+
         if not options:
-            raise DownloadError("No supported 360p, 480p, 720p, 1080p, or audio format was found.")
+            extractor = info.get("extractor_key") or info.get("extractor") or "this site"
+            raise DownloadError(
+                f"No downloadable formats were returned by {extractor}. "
+                "If this is YouTube on Railway, refresh your YouTube cookies and redeploy."
+            )
 
         title = info.get("title") or "Untitled"
         return MediaInfo(
@@ -285,6 +292,10 @@ class Downloader:
         exact_any_audio = f"bestvideo[height={height}][ext=mp4]+bestaudio"
         exact_any_video = f"bestvideo[height={height}]+bestaudio"
         progressive = f"best[height={height}][ext=mp4]/best[height={height}]"
+        best_under_mp4 = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+        best_under_any_audio = f"bestvideo[height<={height}][ext=mp4]+bestaudio"
+        best_under_any_video = f"bestvideo[height<={height}]+bestaudio"
+        best_under_progressive = f"best[height<={height}][ext=mp4]/best[height<={height}]"
 
         if video_id:
             return (
@@ -293,10 +304,47 @@ class Downloader:
                 f"{exact_mp4}/"
                 f"{exact_any_audio}/"
                 f"{exact_any_video}/"
-                f"{progressive}"
+                f"{progressive}/"
+                f"{best_under_mp4}/"
+                f"{best_under_any_audio}/"
+                f"{best_under_any_video}/"
+                f"{best_under_progressive}"
             )
 
-        return f"{exact_mp4}/{exact_any_audio}/{exact_any_video}/{progressive}"
+        return (
+            f"{exact_mp4}/"
+            f"{exact_any_audio}/"
+            f"{exact_any_video}/"
+            f"{progressive}/"
+            f"{best_under_mp4}/"
+            f"{best_under_any_audio}/"
+            f"{best_under_any_video}/"
+            f"{best_under_progressive}"
+        )
+
+    @staticmethod
+    def _fallback_youtube_options() -> dict[str, FormatOption]:
+        options = {
+            str(resolution): FormatOption(
+                key=str(resolution),
+                label=f"{resolution}p MP4",
+                format_selector=Downloader._adaptive_selector(resolution),
+                output_kind="video",
+            )
+            for resolution in SUPPORTED_RESOLUTIONS
+        }
+        options["audio"] = FormatOption(
+            key="audio",
+            label="Audio MP3",
+            format_selector="bestaudio/best",
+            output_kind="audio",
+        )
+        return options
+
+    @staticmethod
+    def _is_youtube_info(url: str, info: dict) -> bool:
+        extractor = f"{info.get('extractor_key') or ''} {info.get('extractor') or ''}".lower()
+        return "youtube" in extractor or "youtu.be" in url or "youtube.com" in url
 
     @staticmethod
     def _format_height(fmt: dict) -> int | None:
