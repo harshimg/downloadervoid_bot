@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class Config:
             path = Path(cookie_path)
             if not path.exists():
                 raise RuntimeError(f"YOUTUBE_COOKIES_FILE does not exist: {path}")
+            logger.info("YouTube cookies loaded from file path: %s", path)
             return path
 
         encoded_cookies = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
@@ -56,6 +59,14 @@ class Config:
             raise RuntimeError("YouTube cookies must be in Netscape cookies.txt format.")
 
         cookies_path.write_text(cookies_text, encoding="utf-8", newline="\n")
+        line_count = len([line for line in cookies_text.splitlines() if line and not line.startswith("#")])
+        required_names = ("SID", "HSID", "SSID", "SAPISID", "LOGIN_INFO")
+        found_names = [name for name in required_names if f"\t{name}\t" in cookies_text]
+        logger.info(
+            "YouTube cookies loaded from YOUTUBE_COOKIES_B64: %s cookie lines, required names found: %s",
+            line_count,
+            ", ".join(found_names) or "none",
+        )
         return cookies_path
 
 

@@ -190,7 +190,7 @@ class Downloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         except Exception as exc:
-            raise DownloadError(str(exc)) from exc
+            raise DownloadError(self._friendly_download_error(str(exc))) from exc
 
         output_files = sorted(work_dir.glob(f"*.{extension}"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not output_files:
@@ -345,6 +345,20 @@ class Downloader:
     def _is_youtube_info(url: str, info: dict) -> bool:
         extractor = f"{info.get('extractor_key') or ''} {info.get('extractor') or ''}".lower()
         return "youtube" in extractor or "youtu.be" in url or "youtube.com" in url
+
+    @staticmethod
+    def _friendly_download_error(message: str) -> str:
+        if "Sign in to confirm" in message or "not a bot" in message:
+            if CONFIG.youtube_cookies_file:
+                return (
+                    "YouTube rejected the saved cookies. Export fresh YouTube cookies from a browser where "
+                    "you are logged in, update Railway variable YOUTUBE_COOKIES_B64, and redeploy."
+                )
+            return (
+                "YouTube blocked Railway as a bot. Add Railway variable YOUTUBE_COOKIES_B64 with exported "
+                "YouTube cookies, then redeploy."
+            )
+        return message
 
     @staticmethod
     def _format_height(fmt: dict) -> int | None:
