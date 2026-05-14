@@ -82,7 +82,14 @@ class Downloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:  # yt-dlp raises many extractor-specific errors.
-            raise DownloadError(f"Could not fetch media information: {exc}") from exc
+            if "Requested format is not available" not in str(exc):
+                raise DownloadError(f"Could not fetch media information: {exc}") from exc
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False, process=False)
+            except Exception as retry_exc:
+                raise DownloadError(f"Could not fetch media information: {retry_exc}") from retry_exc
 
         if not info:
             raise DownloadError("No media information was returned.")
@@ -334,6 +341,7 @@ class Downloader:
         opts = {
             "quiet": True,
             "no_warnings": True,
+            "ignoreconfig": True,
             "ignoreerrors": False,
             "retries": 5,
             "fragment_retries": 5,
