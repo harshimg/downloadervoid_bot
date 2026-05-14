@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,10 @@ class FormatOption:
     output_kind: str
     estimated_size: int | None = None
 
+    @property
+    def requires_ffmpeg(self) -> bool:
+        return "+" in self.format_selector or self.output_kind == "audio"
+
 
 @dataclass(frozen=True)
 class MediaInfo:
@@ -57,6 +63,7 @@ class Downloader:
     def __init__(self, downloads_dir: Path = CONFIG.downloads_dir) -> None:
         self.downloads_dir = downloads_dir
         self._download_semaphore = asyncio.Semaphore(CONFIG.max_concurrent_downloads)
+        self._ffmpeg_path = self._find_ffmpeg()
 
     async def extract_info(self, url: str) -> MediaInfo:
         return await asyncio.to_thread(self._extract_info_sync, url)
@@ -124,6 +131,13 @@ class Downloader:
         work_dir: Path,
         progress: ProgressState,
     ) -> Path:
+        if option.requires_ffmpeg and not self._ffmpeg_path:
+            raise DownloadError(
+                "ffmpeg is not installed or not available in PATH. "
+                "Run pip install -r requirements.txt, then restart the bot. "
+                "480p, 720p, 1080p, and MP3 downloads require ffmpeg to merge/convert media."
+            )
+
         safe_title = sanitize_filename(title)
         extension = "mp3" if option.output_kind == "audio" else "mp4"
         output_template = str(work_dir / f"{safe_title}.%(ext)s")
@@ -143,6 +157,9 @@ class Downloader:
                 progress.update_from_thread(status="processing", percent=100.0)
 
         ydl_opts = self._base_ydl_opts()
+        if self._ffmpeg_path:
+            ydl_opts["ffmpeg_location"] = self._ffmpeg_path
+
         ydl_opts.update(
             {
                 "format": option.format_selector,
@@ -171,6 +188,14 @@ class Downloader:
 
     def _build_format_options(self, formats: list[dict]) -> dict[str, FormatOption]:
         options: dict[str, FormatOption] = {}
+        available_video_heights = {
+            height
+            for fmt in formats
+            if fmt.get("vcodec") not in (None, "none")
+            for height in [self._format_height(fmt)]
+            if height
+        }
+        max_video_height = max(available_video_heights, default=0)
 
         for resolution in SUPPORTED_RESOLUTIONS:
             progressive = self._best_progressive_mp4(formats, resolution)
@@ -186,17 +211,21 @@ class Downloader:
                 continue
 
             video = self._best_video_mp4(formats, resolution) or self._best_video_any(formats, resolution)
+            if not video and max_video_height >= resolution:
+                options[str(resolution)] = FormatOption(
+                    key=str(resolution),
+                    label=f"{resolution}p MP4",
+                    format_selector=self._adaptive_selector(resolution),
+                    output_kind="video",
+                )
+                continue
+
             if video:
                 video_id = str(video["format_id"])
                 options[str(resolution)] = FormatOption(
                     key=str(resolution),
                     label=f"{resolution}p MP4",
-                    format_selector=(
-                        f"{video_id}+bestaudio[ext=m4a]/"
-                        f"{video_id}+bestaudio/"
-                        f"best[height={resolution}][ext=mp4]/"
-                        f"best[height={resolution}]"
-                    ),
+                    format_selector=self._adaptive_selector(resolution, video_id),
                     output_kind="video",
                     estimated_size=estimate_format_size(formats, [video_id]),
                 )
@@ -216,7 +245,7 @@ class Downloader:
         candidates = [
             fmt
             for fmt in formats
-            if fmt.get("height") == height
+            if Downloader._format_height(fmt) == height
             and fmt.get("ext") == "mp4"
             and fmt.get("vcodec") not in (None, "none")
             and fmt.get("acodec") not in (None, "none")
@@ -228,7 +257,7 @@ class Downloader:
         candidates = [
             fmt
             for fmt in formats
-            if fmt.get("height") == height
+            if Downloader._format_height(fmt) == height
             and fmt.get("ext") == "mp4"
             and fmt.get("vcodec") not in (None, "none")
         ]
@@ -239,9 +268,48 @@ class Downloader:
         candidates = [
             fmt
             for fmt in formats
-            if fmt.get("height") == height and fmt.get("vcodec") not in (None, "none")
+            if Downloader._format_height(fmt) == height and fmt.get("vcodec") not in (None, "none")
         ]
         return Downloader._best_by_quality(candidates)
+
+    @staticmethod
+    def _adaptive_selector(height: int, video_id: str | None = None) -> str:
+        exact_mp4 = f"bestvideo[height={height}][ext=mp4]+bestaudio[ext=m4a]"
+        exact_any_audio = f"bestvideo[height={height}][ext=mp4]+bestaudio"
+        exact_any_video = f"bestvideo[height={height}]+bestaudio"
+        progressive = f"best[height={height}][ext=mp4]/best[height={height}]"
+
+        if video_id:
+            return (
+                f"{video_id}+bestaudio[ext=m4a]/"
+                f"{video_id}+bestaudio/"
+                f"{exact_mp4}/"
+                f"{exact_any_audio}/"
+                f"{exact_any_video}/"
+                f"{progressive}"
+            )
+
+        return f"{exact_mp4}/{exact_any_audio}/{exact_any_video}/{progressive}"
+
+    @staticmethod
+    def _format_height(fmt: dict) -> int | None:
+        height = fmt.get("height")
+        if isinstance(height, int):
+            return height
+
+        resolution = fmt.get("resolution")
+        if isinstance(resolution, str) and "x" in resolution:
+            maybe_height = resolution.rsplit("x", 1)[-1]
+            if maybe_height.isdigit():
+                return int(maybe_height)
+
+        format_note = fmt.get("format_note")
+        if isinstance(format_note, str):
+            match = re.search(r"(\d{3,4})p", format_note)
+            if match:
+                return int(match.group(1))
+
+        return None
 
     @staticmethod
     def _best_by_quality(candidates: list[dict]) -> dict | None:
@@ -274,12 +342,20 @@ class Downloader:
             "http_chunk_size": 10 * 1024 * 1024,
             "prefer_ffmpeg": True,
             "geo_bypass": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web"],
-                }
-            },
         }
+
+    @staticmethod
+    def _find_ffmpeg() -> str | None:
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return None
 
     @staticmethod
     def _postprocessors(option: FormatOption) -> list[dict]:
