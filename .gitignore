@@ -1,0 +1,7 @@
+.env
+cookies.txt
+youtube_cookies.txt
+downloads/*
+!downloads/.gitkeep
+__pycache__/
+*.pyc

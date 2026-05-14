@@ -331,7 +331,7 @@ class Downloader:
 
     @staticmethod
     def _base_ydl_opts() -> dict:
-        return {
+        opts = {
             "quiet": True,
             "no_warnings": True,
             "ignoreerrors": False,
@@ -343,6 +343,9 @@ class Downloader:
             "prefer_ffmpeg": True,
             "geo_bypass": True,
         }
+        if CONFIG.youtube_cookies_file:
+            opts["cookiefile"] = str(CONFIG.youtube_cookies_file)
+        return opts
 
     @staticmethod
     def _find_ffmpeg() -> str | None:
